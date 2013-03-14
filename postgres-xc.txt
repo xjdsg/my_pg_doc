@@ -1,0 +1,41 @@
+1.coordinator&&datanode通信
+1）PREPARE
+postgres 有个PREPARE语句，类似于建立sql语句的模板，详见http://www.postgresql.org/docs/9.2/static/sql-prepare.html
+When the PREPARE statement is executed, the specified statement is parsed, analyzed, and rewritten. When an EXECUTE command is subsequently issued, the prepared statement is planned and executed. 
+这个模板可以在client中复用，同样，若sql语句是基于模板创建的话，后台的datanode可以直接refer to这个PreparedStatement,其中存储了CachedPlanSource
+
+2）CommandType
+PostgresMain读取命令时，解析第一个字符将命令分为几种情况:Q查询，P解析，B绑定，E执行等
+Q：exec_simple_query
+  简单的查询语句
+P:exec_parse_message 
+  ->parse->analyzed->rewrite->pq_putemptymessage('1');,与Q不同的是，在prepared statement is named ,会将得到的querytree存入plancache中，释放MessageContext中的空间，否则，由于未命名的计划可能不需要保留很长时间，则将其存放在临时的query_context中
+  在这个过程中，可事先知道参数个数，类型等，一般传输的是oid，但是在coordinator链接时传输的是类型名，之后再转为oid
+B:exec_bind_message
+  create a portal from prepared statement
+  -> FetchPreparedStatement->CreatePortal->PortalStart->pq_putemptymessage('2');  
+E:exec_execute_message
+  ->GetPortalByName->PortalRun->|if success EndCommand
+                                |if not complete send PortalSuspended  pq_putemptymessage('s');
+D: describe，plan 或者portal的describe信息处理
+S：sync ，同步信息
+sql 解析过程 sql->parsetree->querytree->plantree->portal
+
+(3)PGXC通信
+其函数调用如下：
+ExecutorRun 
+|->standard_ExecutorRun 
+  |->ExecutePlan
+    |->ExecProcNode
+      |case:T_RemoteQueryState -->ExecRemoteQuery
+        |->RemoteQueryNext
+          |->do_query
+             |->pgxc_start_command_on_connection
+               |if statement... -->pgxc_node_send_query_extended
+                                   |if ActivateDatanodeStatementOnNode preparedstmt被引用并且已经存在，send P+sql+params
+                                   |else ->send B+portalname+stmtname ->send D(describe)->send E+portalname -> send S 同步信息
+               |else -->pgxc_node_send_query(..,sql_statement) send Q+sql
+所以PGXC，coordinator传递给datanote的还是sql语句，在有PrepareStatement时是怎样传递的有待进一步阅读 TODO 。
+
+
+
